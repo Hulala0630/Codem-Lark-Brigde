@@ -13,6 +13,7 @@ import {
   createUnknownChat,
   extractIdsFromValue,
 } from '@client/src/components/business-ui/chat-select/utils';
+import { logger } from '@lark-apaas/client-toolkit/logger';
 
 export type UseChatValueResult = {
   /**
@@ -99,7 +100,7 @@ export function useChatValue(
           return next;
         });
       } catch (error) {
-        console.error('Failed to resolve chat IDs:', error);
+        logger.error('Failed to resolve chat IDs:', String(error));
         if (!cancelled) {
           setResolvedChats((prev) => {
             const next = new Map(prev);

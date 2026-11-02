@@ -80,7 +80,7 @@ export function OverflowTooltipText({
         <TooltipTrigger asChild>{textNode}</TooltipTrigger>
         <TooltipContent
           sideOffset={4}
-          className="bg-[rgb(31,35,41)] text-white ring-0"
+          className="bg-[rgb(31_35_41)] text-white ring-0"
         >
           {text}
         </TooltipContent>

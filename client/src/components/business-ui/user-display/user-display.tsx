@@ -93,7 +93,7 @@ export const UserDisplay: React.FC<IUserDisplayProps> = ({
                 data={user}
                 size={size}
                 showLabel={showLabel}
-                className="cursor-pointer hover:bg-[rgba(31,35,41,0.15)] active:bg-[rgba(31,35,41,0.2)]"
+                className="cursor-pointer hover:bg-[rgba(31_35_41_0.15)] active:bg-[rgba(31_35_41_0.2)]"
               />
             </div>
           </PopoverTrigger>
@@ -101,7 +101,7 @@ export const UserDisplay: React.FC<IUserDisplayProps> = ({
             align="start"
             sideOffset={8}
             onOpenAutoFocus={handleProfileOpenAutoFocus}
-            className="w-[320px] border-0 border-border/50 bg-card p-0 shadow-[0px_8px_24px_8px_rgba(31,35,41,0.04),0px_6px_12px_rgba(31,35,41,0.04),0px_4px_8px_-8px_rgba(31,35,41,0.06)]"
+            className="w-[320px] border-0 border-border/50 bg-card p-0 shadow-[0px_8px_24px_8px_rgba(31_35_41_0.04),0px_6px_12px_rgba(31_35_41_0.04),0px_4px_8px_-8px_rgba(31_35_41_0.06)]"
           >
             <UserProfile value={user} />
           </PopoverContent>
