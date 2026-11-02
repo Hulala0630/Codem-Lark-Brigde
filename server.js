@@ -28,7 +28,20 @@
 
 'use strict';
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { execFile } = require('node:child_process');
+
+// ---------- 工作项 → 群映射持久化 ----------
+const DATA_DIR = path.join(__dirname, 'data');
+const MAP_FILE = path.join(DATA_DIR, 'workitem-groups.json');
+
+function loadGroupMap() {
+  try { return JSON.parse(fs.readFileSync(MAP_FILE, 'utf8')); } catch { return {}; }
+}
+function saveGroupMap(map) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(MAP_FILE, JSON.stringify(map, null, 2)); } catch (e) { console.error('[map] save failed:', e.message); }
+}
 
 const PORT = parseInt(process.env.PORT || '3210', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -70,6 +83,27 @@ function openBrowser(url) {
   return false;
 }
 
+// Meego changed_fields → 群内首条消息文本
+function formatChangedFields(changedFields, wi) {
+  const fields = Array.isArray(changedFields) ? changedFields : [];
+  const lines = [];
+  for (const f of fields) {
+    const label = f.field_alias || f.field_key || 'field';
+    const pick = (v, md) => {
+      if (md && typeof md === 'object' && typeof md.markdown === 'string') return md.markdown;
+      if (v === null || v === undefined || v === '') return '(空)';
+      if (typeof v === 'string') return v;
+      return JSON.stringify(v);
+    };
+    const pre = pick(f.pre_field_value, f.pre_field_value_markdown);
+    const cur = pick(f.cur_field_value, f.cur_field_value_markdown);
+    const t = (s) => (s.length > 120 ? s.slice(0, 117) + '...' : s);
+    lines.push(`- ${label}：${t(pre)} → ${t(cur)}`);
+  }
+  const head = `【Meego 工作项变更】${wi.type || 'workitem'}#${wi.id}「${wi.name || ''}」`;
+  return lines.length ? `${head}\n${lines.join('\n')}` : head;
+}
+
 function handleMeegoEvent(body) {
   const payload = (body && body.payload) || {};
   const id = payload.id;
@@ -82,17 +116,27 @@ function handleMeegoEvent(body) {
   const description = `Meego 工作项：${type} #${id}${wiName ? `「${wiName}」` : ''}${project ? `（空间：${project}）` : ''}。由 webhook 自动创建`.slice(0, 100);
 
   const pid = String(++pendingSeq);
+  const existing = loadGroupMap()[String(id)];
+  const wi = { id, name: wiName, type, project };
   pendingGroups.set(pid, {
     pending_id: pid,
     created_at: Date.now(),
     source: 'meego',
-    work_item: { id, name: wiName, type, project },
+    work_item: wi,
+    mode: existing ? 'update' : 'create',
+    existing_chat: existing || null,
     name: groupName,
     description,
+    changed_text: formatChangedFields(payload.changed_fields, wi),
     updated_by: payload.updated_by || '',
     updated_at: payload.updated_at || null,
   });
-  return { status: 200, payload: { ok: true, pending_id: pid, group_name: groupName } };
+  return {
+    status: 200,
+    payload: existing
+      ? { ok: true, pending_id: pid, mode: 'update', existing_chat: existing }
+      : { ok: true, pending_id: pid, mode: 'create', group_name: groupName },
+  };
 }
 
 // 把一个成员标识（姓名/邮箱/open_id）解析为 open_id
@@ -120,6 +164,57 @@ async function resolveMember(idOrName) {
   };
 }
 
+// 发送群内消息（以用户身份）
+async function sendChatMessage(chatId, text) {
+  const r = await runLarkCli(['im', '+messages-send', '--chat-id', chatId, '--text', text, '--as', 'user', '--json']);
+  return r.parsed && r.parsed.ok;
+}
+
+// 把新用户/机器人拉进已有群（已存在的会被过滤，不重复拉）
+async function addToExistingChat(chatId, users, bots) {
+  const result = { users_added: 0, bots_added: 0, skipped: [], errors: [] };
+
+  // 查询群内现有成员与机器人
+  const cur = await runLarkCli(['im', '+chat-members-list', '--chat-id', chatId, '--as', 'user', '--json']);
+  let existingUsers = new Set();
+  let existingBots = new Set();
+  if (cur.parsed && cur.parsed.ok) {
+    const d = cur.parsed.data || {};
+    existingUsers = new Set((d.users || []).map((u) => u.member_id));
+    existingBots = new Set((d.bots || []).map((b) => b.app_id));
+  }
+
+  const newUsers = users ? users.split(',').filter((u) => !existingUsers.has(u)) : [];
+  const newBots = bots.filter((b) => !existingBots.has(b));
+  result.skipped = [...(users ? users.split(',').filter((u) => existingUsers.has(u)) : []), ...bots.filter((b) => existingBots.has(b))];
+
+  if (newUsers.length) {
+    const r = await runLarkCli([
+      'im', 'chat.members', 'create',
+      '--chat-id', chatId,
+      '--member-id-type', 'open_id',
+      '--succeed-type', '1',
+      '--data', JSON.stringify({ id_list: newUsers }),
+      '--as', 'user', '--json',
+    ]);
+    if (r.parsed && r.parsed.ok) result.users_added = newUsers.length;
+    else result.errors.push((r.parsed && r.parsed.error && r.parsed.error.message) || 'add users failed');
+  }
+  if (newBots.length) {
+    const r = await runLarkCli([
+      'im', 'chat.members', 'create',
+      '--chat-id', chatId,
+      '--member-id-type', 'app_id',
+      '--succeed-type', '1',
+      '--data', JSON.stringify({ id_list: newBots }),
+      '--as', 'user', '--json',
+    ]);
+    if (r.parsed && r.parsed.ok) result.bots_added = newBots.length;
+    else result.errors.push((r.parsed && r.parsed.error && r.parsed.error.message) || 'add bots failed');
+  }
+  return result;
+}
+
 async function handleCreateGroup(body) {
   const name = typeof body.name === 'string' ? body.name.trim() : '';
   if (!name) return { status: 400, payload: { ok: false, error: 'field "name" is required' } };
@@ -138,6 +233,10 @@ async function handleCreateGroup(body) {
   const includeMe = body.include_me !== false;
   const members = Array.isArray(body.members) ? body.members : [];
 
+  // 关联的 Meego 草稿（决定：已有群→更新模式；建群后发首条消息、存映射）
+  const pending = body.pending_id ? pendingGroups.get(String(body.pending_id)) : null;
+  if (body.pending_id && !pending) return { status: 404, payload: { ok: false, error: 'pending not found' } };
+
   const resolved = [];
   const unresolved = [];
   for (const m of members) {
@@ -152,6 +251,31 @@ async function handleCreateGroup(body) {
   for (const r of resolved) if (r.openId) userSet.add(r.openId);
   const users = [...userSet].join(',');
 
+  // ---------- 更新模式：群已存在，拉新机器人/成员 + 发变更消息，不新建 ----------
+  if (pending && pending.mode === 'update' && pending.existing_chat) {
+    const ec = pending.existing_chat;
+    const upd = await addToExistingChat(ec.chat_id, users, bots);
+    let message_sent = false;
+    if (pending.changed_text) message_sent = await sendChatMessage(ec.chat_id, pending.changed_text);
+    return {
+      status: 200,
+      payload: {
+        ok: true,
+        mode: 'update',
+        chat_id: ec.chat_id,
+        chat_name: ec.chat_name,
+        link: `https://applink.feishu.cn/client/chat/open?openChatId=${ec.chat_id}`,
+        users_added: upd.users_added,
+        bots_added: upd.bots_added,
+        already_in_chat: upd.skipped,
+        changed_fields_message_sent: message_sent,
+        errors: upd.errors.length ? upd.errors : undefined,
+        unresolved_members: unresolved,
+      },
+    };
+  }
+
+  // ---------- 创建模式 ----------
   const args = [
     'im', '+chat-create',
     '--name', name,
@@ -173,15 +297,31 @@ async function handleCreateGroup(body) {
     };
   }
   const chat = (r.parsed.data && (r.parsed.data.chat || r.parsed.data)) || {};
+
+    // 工作项 → 群映射落盘（后续同工作项事件走更新模式）
+    if (pending && pending.work_item && chat.chat_id) {
+      const map = loadGroupMap();
+      map[String(pending.work_item.id)] = { chat_id: chat.chat_id, chat_name: chat.name || name, created_at: Date.now() };
+      saveGroupMap(map);
+      }
+
+      // Meego 变更字段作为群内第一条消息
+      let first_message_sent = false;
+    if (pending && pending.changed_text && chat.chat_id) {
+  first_message_sent = await sendChatMessage(chat.chat_id, pending.changed_text);
+}
+
   return {
     status: 200,
     payload: {
       ok: true,
+      mode: 'create',
       chat_id: chat.chat_id,
       chat_name: chat.name || name,
       link: chat.chat_app_link || (chat.chat_id ? `https://applink.feishu.cn/client/chat/open?openChatId=${chat.chat_id}` : undefined),
       members_added: users ? users.split(',').length : 0,
       bots_invited: botsStr ? botsStr.split(',') : [],
+      changed_fields_message_sent: first_message_sent,
       unresolved_members: unresolved,
     },
   };

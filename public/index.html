@@ -116,8 +116,16 @@ addBot(CODEM_BOT_APP_ID, true); // CodeM 机器人默认勾选，可取消
     const info = document.getElementById('pendingInfo');
     banner.style.display = '';
     const wi = p.work_item || {};
-    info.innerHTML = `<b>来自 Meego 工作项变更事件</b><br>工作项：${wi.type || ''} <a href="https://project.feishu.cn/workitem?item_id=${wi.id}" target="_blank">#${wi.id}</a>「${wi.name || ''}」${wi.project ? `（空间：${wi.project}）` : ''}` +
-      `<br>群名已预填（含工作项 id，可修改），请确认成员与机器人后点击「创建群聊」`;
+    const wiLink = `https://project.feishu.cn/workitem?item_id=${wi.id}`;
+    if (p.mode === 'update' && p.existing_chat) {
+      document.getElementById('name').value = p.existing_chat.chat_name || p.name || '';
+      info.innerHTML = `<b>群已存在，将进入更新模式</b><br>工作项：${wi.type || ''} <a href="${wiLink}" target="_blank">#${wi.id}</a>「${wi.name || ''}」已有群「${p.existing_chat.chat_name}」（<a href="https://applink.feishu.cn/client/chat/open?openChatId=${p.existing_chat.chat_id}" target="_blank">打开群</a>）<br>确认后：新勾选的机器人/成员会拉入已有群（已在群内的自动跳过），变更字段将发送到群内；不会新建群`;
+      document.getElementById('desc').value = '';
+    } else {
+      info.innerHTML = `<b>来自 Meego 工作项变更事件（新建群）</b><br>工作项：${wi.type || ''} <a href="${wiLink}" target="_blank">#${wi.id}</a>「${wi.name || ''}」${wi.project ? `（空间：${wi.project}）` : ''}` +
+        `<br>群名已预填（含工作项 id，可修改）；确认成员与机器人后点击「创建群聊」，Meego 变更字段将作为群内第一条消息发送`;
+    }
+    window.__pendingId = p.pending_id;
   } catch (e) { console.warn('load pending failed', e); }
 })();
 
@@ -144,6 +152,7 @@ async function submitForm() {
     members,
     include_me: document.getElementById('include_me').checked,
     bots,
+    pending_id: window.__pendingId || undefined,
   };
 
   btn.disabled = true;
@@ -158,12 +167,21 @@ async function submitForm() {
     card.style.display = '';
     if (data.ok) {
       result.className = 'ok';
-      result.innerHTML = `✅ 群「${data.chat_name}」创建成功` +
-        (data.link ? `<br>打开群聊：<a href="${data.link}" target="_blank">${data.link}</a>` : '') +
-        `<br>已拉成员数：${data.members_added}；机器人：${(data.bots_invited || []).join('、')}` +
-        ((data.unresolved_members || []).length
-          ? `<br>⚠️ 以下成员未解析成功：${data.unresolved_members.map(m => `${m.member}（${m.reason}）`).join('、')}，可改传 open_id 重试`
-          : '');
+      const link = data.link ? `<a href="${data.link}" target="_blank">${data.link}</a>` : '';
+      if (data.mode === 'update') {
+        result.innerHTML = `✅ 已更新群「${data.chat_name}」` + (link ? `<br>${link}` : '') +
+          `<br>新增成员：${data.users_added ?? 0}；新增机器人：${data.bots_added ?? 0}` +
+          ((data.already_in_chat || []).length ? `<br>已在群内跳过：${data.already_in_chat.join('、')}` : '') +
+          `<br>变更字段消息${data.changed_fields_message_sent ? '已发送到群内' : '发送失败'}`;
+      } else {
+        result.innerHTML = `✅ 群「${data.chat_name}」创建成功` +
+          (data.link ? `<br>打开群聊：${link}` : '') +
+          `<br>已拉成员数：${data.members_added}；机器人：${(data.bots_invited || []).join('、')}` +
+          `<br>变更字段首条消息${data.changed_fields_message_sent ? '已发送' : '发送失败'}`;
+      }
+      result.innerHTML += ((data.unresolved_members || []).length
+        ? `<br>⚠️ 以下成员未解析成功：${data.unresolved_members.map(m => `${m.member}（${m.reason}）`).join('、')}，可改传 open_id 重试`
+        : '');
     } else {
       result.className = 'err';
       result.textContent = '❌ 创建失败：' + (data.error || JSON.stringify(data));
