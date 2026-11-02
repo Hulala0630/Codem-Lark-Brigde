@@ -52,17 +52,21 @@
       <label for="include_me" style="margin:0">把服务部署者（我）拉进群</label>
     </div>
 
-    <label>拉取的机器人（app_id，cli_ 开头）</label>
+    <label>拉取的机器人（可勾选，app_id 需 cli_ 开头；不勾选则不拉取）</label>
     <div id="bots"></div>
     <div class="row">
       <button class="ghost" type="button" onclick="addBot('')">+ 添加其他机器人</button>
     </div>
-    <div class="hint">默认拉取飞书 CodeM 机器人；在输入框填入其他机器人的 app_id 可同时拉取，单群最多 5 个机器人</div>
+    <div class="hint">CodeM 机器人默认勾选，可自行取消；额外行填入其他机器人的 app_id 可同时拉取，单群最多 5 个机器人</div>
 
     <div class="row">
       <button id="submit" onclick="submitForm()">创建群聊</button>
       <span id="submitting" style="font-size:13px;color:#8f959e"></span>
     </div>
+  </div>
+
+  <div class="card" id="pendingBanner" style="display:none">
+    <div id="pendingInfo" style="font-size:14px;line-height:1.7"></div>
   </div>
 
   <div class="card" id="resultCard" style="display:none">
@@ -78,10 +82,15 @@ function addBot(value, locked) {
   const box = document.getElementById('bots');
   const div = document.createElement('div');
   div.className = 'bot-item';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.checked = true;
   const input = document.createElement('input');
   input.type = 'text'; input.value = value; input.disabled = !!locked;
   input.placeholder = 'cli_xxxxxxxxxxxx';
-  div.appendChild(input);
+  const label = document.createElement('span');
+  label.style.fontSize = '13px'; label.style.color = '#646a73';
+  label.textContent = value ? (locked ? '（CodeM 机器人，可取消勾选）' : '') : '（其他机器人）';
+  div.appendChild(cb); div.appendChild(input); div.appendChild(label);
   if (!locked) {
     const del = document.createElement('button');
     del.className = 'del'; del.textContent = '✕'; del.title = '移除';
@@ -90,7 +99,27 @@ function addBot(value, locked) {
   }
   box.appendChild(div);
 }
-addBot(CODEM_BOT_APP_ID, true); // CodeM 机器人固定拉取
+addBot(CODEM_BOT_APP_ID, true); // CodeM 机器人默认勾选，可取消
+
+// 加载 Meego 草稿：URL 带 ?pending=<id> 时预填工作项信息
+(async function loadPending() {
+  const m = new URLSearchParams(location.search).get('pending');
+  if (!m) return;
+  try {
+    const res = await fetch(`/api/pending/${encodeURIComponent(m)}`);
+    const data = await res.json();
+    if (!data.ok) { alert('草稿不存在或已过期：' + (data.error || '')); return; }
+    const p = data.pending;
+    document.getElementById('name').value = p.name || '';
+    document.getElementById('desc').value = p.description || '';
+    const banner = document.getElementById('pendingBanner');
+    const info = document.getElementById('pendingInfo');
+    banner.style.display = '';
+    const wi = p.work_item || {};
+    info.innerHTML = `<b>来自 Meego 工作项变更事件</b><br>工作项：${wi.type || ''} <a href="https://project.feishu.cn/workitem?item_id=${wi.id}" target="_blank">#${wi.id}</a>「${wi.name || ''}」${wi.project ? `（空间：${wi.project}）` : ''}` +
+      `<br>群名已预填（含工作项 id，可修改），请确认成员与机器人后点击「创建群聊」`;
+  } catch (e) { console.warn('load pending failed', e); }
+})();
 
 async function submitForm() {
   const name = document.getElementById('name').value.trim();
@@ -102,8 +131,10 @@ async function submitForm() {
 
   const members = document.getElementById('members').value
     .split(/\n+/).map(s => s.trim()).filter(Boolean);
-  const bots = [...document.querySelectorAll('#bots input')]
-    .map(i => i.value.trim()).filter(v => /^cli_[0-9a-z]+$/i.test(v));
+  const bots = [...document.querySelectorAll('#bots .bot-item')]
+    .filter(row => row.querySelector('input[type=checkbox]').checked)
+    .map(row => row.querySelector('input[type=text]').value.trim())
+    .filter(v => /^cli_[0-9a-z]+$/i.test(v));
   const invalidBots = [...document.querySelectorAll('#bots input')]
     .map(i => i.value.trim()).filter(v => v && !/^cli_[0-9a-z]+$/i.test(v));
 

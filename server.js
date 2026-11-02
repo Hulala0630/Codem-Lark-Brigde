@@ -48,6 +48,53 @@ function runLarkCli(args) {
   });
 }
 
+// ---------- Meego 工作项事件 → 待建群草稿 ----------
+// 收到 WorkitemUpdateEvent 后生成草稿并自动打开前端页面，由用户确认机器人/成员后建群
+const pendingGroups = new Map();
+let pendingSeq = 0;
+
+function baseUrl(req) {
+  const host = req.headers.host || `127.0.0.1:${PORT}`;
+  return `http://${host}`;
+}
+
+// 自动打开浏览器（部署机为 macOS 时；其它平台仅打印链接）
+function openBrowser(url) {
+  try {
+    if (process.platform === 'darwin') {
+      require('node:child_process').spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+  } catch { /* ignore */ }
+  console.log(`[pending] open in browser: ${url}`);
+  return false;
+}
+
+function handleMeegoEvent(body) {
+  const payload = (body && body.payload) || {};
+  const id = payload.id;
+  if (!id) return { status: 400, payload: { ok: false, error: 'payload.id (工作项 id) 缺失' } };
+
+  const type = payload.work_item_type_key || 'workitem';
+  const wiName = (payload.name || '').trim();
+  const project = payload.project_simple_name || payload.project_key || '';
+  const groupName = wiName ? `${type}#${id} ${wiName}`.slice(0, 60) : `${type}#${id}`.slice(0, 60);
+  const description = `Meego 工作项：${type} #${id}${wiName ? `「${wiName}」` : ''}${project ? `（空间：${project}）` : ''}。由 webhook 自动创建`.slice(0, 100);
+
+  const pid = String(++pendingSeq);
+  pendingGroups.set(pid, {
+    pending_id: pid,
+    created_at: Date.now(),
+    source: 'meego',
+    work_item: { id, name: wiName, type, project },
+    name: groupName,
+    description,
+    updated_by: payload.updated_by || '',
+    updated_at: payload.updated_at || null,
+  });
+  return { status: 200, payload: { ok: true, pending_id: pid, group_name: groupName } };
+}
+
 // 把一个成员标识（姓名/邮箱/open_id）解析为 open_id
 async function resolveMember(idOrName) {
   const s = String(idOrName).trim();
@@ -78,12 +125,15 @@ async function handleCreateGroup(body) {
   if (!name) return { status: 400, payload: { ok: false, error: 'field "name" is required' } };
   if (name.length > 60) return { status: 400, payload: { ok: false, error: '"name" exceeds 60 chars' } };
 
-  // 机器人列表：默认始终拉 CodeM 机器人，body.bots 可追加其他机器人 app_id（cli_xxx），最多共 5 个
-  const extraBots = (Array.isArray(body.bots) ? body.bots : [])
-    .map((b) => String(b).trim())
-    .filter((b) => /^cli_[0-9a-z]+$/i.test(b));
-  const botSet = new Set([CODEM_BOT_APP_ID, ...extraBots]);
-  const bots = [...botSet].slice(0, 5).join(',');
+  // 机器人列表：body.bots 显式传入时完全以传入为准（可为空数组=不拉任何机器人）；
+  // 未传时默认拉 CodeM 机器人。单群上限 5 个。
+  let bots;
+  if (Array.isArray(body.bots)) {
+    bots = [...new Set(body.bots.map((b) => String(b).trim()).filter((b) => /^cli_[0-9a-z]+$/i.test(b)))].slice(0, 5);
+  } else {
+    bots = [CODEM_BOT_APP_ID];
+  }
+  const botsStr = bots.join(',');
 
   const includeMe = body.include_me !== false;
   const members = Array.isArray(body.members) ? body.members : [];
@@ -107,7 +157,7 @@ async function handleCreateGroup(body) {
     '--name', name,
     '--type', 'private',
     '--users', users,
-    '--bots', bots,
+    '--bots', botsStr,
     '--as', 'user',
     '--json',
   ];
@@ -131,7 +181,7 @@ async function handleCreateGroup(body) {
       chat_name: chat.name || name,
       link: chat.chat_app_link || (chat.chat_id ? `https://applink.feishu.cn/client/chat/open?openChatId=${chat.chat_id}` : undefined),
       members_added: users ? users.split(',').length : 0,
-      bots_invited: bots.split(','),
+      bots_invited: botsStr ? botsStr.split(',') : [],
       unresolved_members: unresolved,
     },
   };
@@ -145,8 +195,39 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && req.url === '/healthz') return json(200, { ok: true });
 
-  // 前端测试页
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+  // Meego 工作项变更 webhook：生成待建群草稿并自动打开前端页面
+  if (req.method === 'POST' && req.url === '/webhook/meego') {
+    if (WEBHOOK_TOKEN && req.headers['x-webhook-token'] !== WEBHOOK_TOKEN) {
+      return json(401, { ok: false, error: 'invalid or missing X-Webhook-Token' });
+    }
+    let buf = '';
+    req.on('data', (c) => { buf += c; if (buf.length > 1024 * 1024) req.destroy(); });
+    req.on('end', () => {
+      let body;
+      try { body = JSON.parse(buf || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON body' }); }
+      const { status, payload } = handleMeegoEvent(body);
+      if (status === 200 && payload.ok) {
+        const url = `${baseUrl(req)}/?pending=${payload.pending_id}`;
+        payload.review_url = url;
+        payload.browser_opened = openBrowser(url);
+        console.log(`[meego] pending=${payload.pending_id} group="${payload.group_name}" review=${url}`);
+      }
+      json(status, payload);
+    });
+    return;
+  }
+
+  // 查询草稿（前端页面打开时拉取预填信息）
+  if (req.method === 'GET' && /^\/api\/pending(\/|$)/.test(req.url)) {
+    const pid = req.url.split('/').pop();
+    const g = pendingGroups.get(pid);
+    if (!g) return json(404, { ok: false, error: 'pending not found' });
+    return json(200, { ok: true, pending: g });
+  }
+
+  // 前端测试页（兼容带 query 的 URL，如 /?pending=1）
+  const pathname = (req.url || '/').split('?')[0];
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
     const htmlPath = require('node:path').join(__dirname, 'public', 'index.html');
     require('node:fs').readFile(htmlPath, (e, data) => {
       if (e) return json(500, { ok: false, error: 'index.html missing: ' + e.message });
@@ -175,7 +256,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  json(404, { ok: false, error: 'not found', endpoints: ['GET /healthz', 'POST /webhook/group'] });
+  json(404, { ok: false, error: 'not found', endpoints: ['GET /', 'GET /healthz', 'POST /webhook/group', 'POST /webhook/meego', 'GET /api/pending/:id'] });
 });
 
 server.listen(PORT, HOST, () => {
