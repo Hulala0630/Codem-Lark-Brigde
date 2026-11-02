@@ -9,9 +9,12 @@ interface FeishuEnvelope<T> {
   data: T;
 }
 
-interface TenantTokenData {
-  tenant_access_token: string;
-  expire: number;
+/** tenant_access_token 接口响应：token 在顶层，不在 data 里 */
+interface TenantTokenResponse {
+  code: number;
+  msg: string;
+  tenant_access_token?: string;
+  expire?: number;
 }
 
 interface CreateChatData {
@@ -68,19 +71,19 @@ export class FeishuApiService {
     }
     const { appId, appSecret } = this.getAppConfig();
     const res = await firstValueFrom(
-      this.http.post<FeishuEnvelope<TenantTokenData>>(
+      this.http.post<TenantTokenResponse>(
         'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
         { app_id: appId, app_secret: appSecret },
         { headers: { 'Content-Type': 'application/json; charset=utf-8' } },
       ),
     );
     const body = res.data;
-    if (body.code !== 0 || !body.data?.tenant_access_token) {
+    if (body.code !== 0 || !body.tenant_access_token) {
       throw new Error(`获取 tenant_access_token 失败：${body.code} ${body.msg}`);
     }
     this.tokenCache = {
-      token: body.data.tenant_access_token,
-      expireAt: now + (body.data.expire ?? 3600) * 1000,
+      token: body.tenant_access_token,
+      expireAt: now + (body.expire ?? 3600) * 1000,
     };
     return this.tokenCache.token;
   }
