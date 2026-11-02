@@ -48,6 +48,8 @@ const HOST = process.env.HOST || '0.0.0.0';
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || '';
 const CODEM_BOT_APP_ID = process.env.CODEM_BOT_APP_ID || 'cli_aac5d4db58385cd3';
 const LARK_CLI = process.env.LARK_CLI || 'lark-cli';
+// 对外可达的服务地址（如 cloudflared 公网地址）；未设置时用请求 Host（仅内网可达）
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 // 服务部署者（lark-cli 登录用户）的 open_id，include_me 时拉进群
 const OWNER_OPEN_ID = process.env.OWNER_OPEN_ID || 'ou_65293baac0acd0ca02ccf7bcbd4a24b8';
 
@@ -102,6 +104,79 @@ function formatChangedFields(changedFields, wi) {
   }
   const head = `【Meego 工作项变更】${wi.type || 'workitem'}#${wi.id}「${wi.name || ''}」`;
   return lines.length ? `${head}\n${lines.join('\n')}` : head;
+}
+
+// 构造 Meego 变更事件通知卡片（信息=变更字段；按钮=建群/更新选择，CodeM 默认勾选）
+function buildEventCard(pending, base) {
+  const wi = pending.work_item || {};
+  const isUpdate = pending.mode === 'update';
+  const title = isUpdate
+    ? `【Meego 工作项变更·群已存在】${wi.type || 'workitem'}#${wi.id}「${wi.name || ''}」`
+    : `【Meego 工作项变更】${wi.type || 'workitem'}#${wi.id}「${wi.name || ''}」`;
+
+  // 变更字段行（与群内首条消息同源）
+  const lines = String(pending.changed_text || '').split('\n').filter(Boolean);
+  const md = lines.slice(1).join('\n') || '-（无字段变更信息）';
+
+  const confirmUrl = (bots) => `${base}/card/confirm?pending=${pending.pending_id}${bots ? `&bots=${encodeURIComponent(bots)}` : ''}`;
+  const verb = isUpdate ? '更新群' : '建群';
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: isUpdate ? 'turquoise' : 'blue',
+      title: { tag: 'plain_text', content: title.slice(0, 100) },
+    },
+    elements: [
+      { tag: 'div', text: { tag: 'lark_md', content: md } },
+      { tag: 'hr' },
+      {
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: isUpdate
+            ? `该工作项已有群「${(pending.existing_chat || {}).chat_name || ''}」，点击按钮将**新勾选的机器人/成员拉入已有群**（已在群内自动跳过），变更信息也会发送到群内。`
+            : `点击按钮一键${verb}：**默认拉入飞书 CodeM 机器人**（已勾选）；不勾选可选「不含 CodeM」；需拉其他机器人，请在自定义页填写 agent 的 app_id。`,
+        },
+      },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: isUpdate ? `✅ 更新群（拉入 CodeM）` : '✅ 一键建群（拉入 CodeM）' },
+            type: 'primary',
+            url: confirmUrl('codem'),
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: `⚙️ 自定义机器人/成员` },
+            type: 'default',
+            url: `${base}/?pending=${pending.pending_id}`,
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: isUpdate ? '更新群（不拉 CodeM）' : '建群（不拉 CodeM）' },
+            type: 'default',
+            url: confirmUrl(''),
+          },
+        ],
+      },
+      { tag: 'note', elements: [{ tag: 'plain_text', content: '由 CodeM-Lark-Bridge 自动发送' }] },
+    ],
+  };
+}
+
+// 发送交互卡片：target 为 { type: 'user'|'chat', id }
+async function sendCard(target, card) {
+  const flag = target.type === 'user' ? '--user-id' : '--chat-id';
+  const r = await runLarkCli([
+    'im', '+messages-send', flag, target.id,
+    '--msg-type', 'interactive',
+    '--content', JSON.stringify(card),
+    '--as', 'user', '--json',
+  ]);
+  return { ok: !!(r.parsed && r.parsed.ok), error: r.parsed && r.parsed.error && r.parsed.error.message };
 }
 
 function handleMeegoEvent(body) {
@@ -327,11 +402,12 @@ async function handleCreateGroup(body) {
   };
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const json = (status, obj) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(obj));
   };
+const pathname = (req.url || '/').split('?')[0];
 
   if (req.method === 'GET' && req.url === '/healthz') return json(200, { ok: true });
 
@@ -342,19 +418,67 @@ const server = http.createServer((req, res) => {
     }
     let buf = '';
     req.on('data', (c) => { buf += c; if (buf.length > 1024 * 1024) req.destroy(); });
-    req.on('end', () => {
+    req.on('end', async () => {
       let body;
       try { body = JSON.parse(buf || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON body' }); }
       const { status, payload } = handleMeegoEvent(body);
       if (status === 200 && payload.ok) {
-        const url = `${baseUrl(req)}/?pending=${payload.pending_id}`;
+        const base = PUBLIC_BASE_URL || baseUrl(req);
+        const url = `${base}/?pending=${payload.pending_id}`;
         payload.review_url = url;
         payload.browser_opened = openBrowser(url);
-        console.log(`[meego] pending=${payload.pending_id} group="${payload.group_name}" review=${url}`);
+      console.log(`[meego] pending=${payload.pending_id} group="${payload.group_name}" review=${url}`);
+
+        // 发送飞书卡片通知：新建→发给部署者私聊；已有群→发到群内
+        const pending = pendingGroups.get(payload.pending_id);
+        if (pending) {
+          const target = pending.mode === 'update' && pending.existing_chat
+            ? { type: 'chat', id: pending.existing_chat.chat_id }
+            : { type: 'user', id: OWNER_OPEN_ID };
+          const cardResult = await sendCard(target, buildEventCard(pending, base));
+          payload.card_sent = cardResult.ok;
+          if (!cardResult.ok) payload.card_error = cardResult.error;
+          console.log(`[meego] card -> ${target.type}:${target.id} ok=${cardResult.ok}`);
+        }
       }
       json(status, payload);
     });
     return;
+  }
+
+  // 卡片一键确认：GET /card/confirm?pending=<id>&bots=codem|cli_a,cli_b|（空）&include_me=1
+  if (req.method === 'GET' && pathname === '/card/confirm') {
+    const q = new URL(req.url, `http://${req.headers.host || 'localhost'}`).searchParams;
+    const pid = q.get('pending');
+    const pending = pid ? pendingGroups.get(pid) : null;
+    if (!pending) { res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<h3>草稿不存在或已过期</h3>'); }
+
+    const botsParam = q.get('bots') || '';
+    const bots = botsParam === 'codem'
+      ? [CODEM_BOT_APP_ID]
+      : botsParam ? botsParam.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const body = {
+      name: pending.name,
+      description: pending.description,
+      members: [],
+      include_me: q.get('include_me') !== '0',
+      bots,
+      pending_id: pending.pending_id,
+    };
+    const { status, payload } = await handleCreateGroup(body);
+    const ok = payload.ok;
+    res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${ok ? '操作成功' : '操作失败'}</title></head>` +
+      `<body style="font-family:-apple-system,PingFang SC,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">` +
+      `<h2>${ok ? (payload.mode === 'update' ? '✅ 群已更新' : '✅ 群已创建') : '❌ 操作失败'}</h2>` +
+      (ok
+        ? `<p>群：<b>${payload.chat_name || ''}</b></p>` +
+          (payload.link ? `<p><a href="${payload.link}">打开群聊</a></p>` : '') +
+          `<p>新增成员：${payload.users_added ?? payload.members_added ?? 0}；机器人：${(payload.bots_invited || []).join('、') || '无'}</p>` +
+          `<p>变更字段消息：${payload.changed_fields_message_sent ? '已发送到群内' : '发送失败'}</p>` +
+          ((payload.already_in_chat || []).length ? `<p>已在群内跳过：${payload.already_in_chat.join('、')}</p>` : '')
+        : `<p>错误：${payload.error || 'unknown'}</p>`) +
+      `</body></html>`);
   }
 
   // 查询草稿（前端页面打开时拉取预填信息）
@@ -366,7 +490,6 @@ const server = http.createServer((req, res) => {
   }
 
   // 前端测试页（兼容带 query 的 URL，如 /?pending=1）
-  const pathname = (req.url || '/').split('?')[0];
   if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
     const htmlPath = require('node:path').join(__dirname, 'public', 'index.html');
     require('node:fs').readFile(htmlPath, (e, data) => {
