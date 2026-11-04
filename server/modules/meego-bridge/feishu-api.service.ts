@@ -188,6 +188,11 @@ export class FeishuApiService {
     return this.sendMessage('chat_id', chatId, 'text', { text });
   }
 
+  /** 发送文本消息给个人（汇总通知负责人用） */
+  async sendTextToUser(openId: string, text: string): Promise<string> {
+    return this.sendMessage('open_id', openId, 'text', { text });
+  }
+
   /** 发送交互卡片（新建模式：发给确认人私聊） */
   async sendCardToUser(ownerOpenId: string, card: unknown): Promise<string> {
     return this.sendMessage('open_id', ownerOpenId, 'interactive', card);

@@ -5,6 +5,7 @@ import { PlatformModule } from '@lark-apaas/fullstack-nestjs-core';
 import { GlobalExceptionFilter } from './common/filters/exception.filter';
 import { ViewModule } from './modules/view/view.module';
 import { MeegoBridgeModule } from './modules/meego-bridge/meego-bridge.module';
+import { IsgmNotificationModule } from './modules/isgm-notification/isgm-notification.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { MeegoBridgeModule } from './modules/meego-bridge/meego-bridge.module';
     // ====== @route-section: business-modules START ======
     // Place all business modules here.Do NOT add fallback modules here.
     MeegoBridgeModule,
+    IsgmNotificationModule,
     // ====== @route-section: business-modules END ======
 
     // ⚠️ @route-order: last

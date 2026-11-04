@@ -163,6 +163,33 @@ export const meegoPending = pgTable("meego_pending", {
   index("idx_meego_pending_status").on(table.status),
 ]);
 
+export const riskFeedback = pgTable("risk_feedback", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  cycleKey: varchar("cycle_key", { length: 64 }).notNull(),
+  riskHash: varchar("risk_hash", { length: 40 }).notNull(),
+  riskDesc: text("risk_desc").notNull(),
+  ownerOpenId: varchar("owner_open_id", { length: 64 }).notNull(),
+  ownerName: varchar("owner_name", { length: 128 }),
+  status: varchar("status", { length: 16 }).notNull().default('pending'),
+  feedback: text("feedback"),
+  deadline: customTimestamptz("deadline", { precision: 3 }),
+  // System field: Creation time (auto-filled, do not modify)
+  createdAt: customTimestamptz("_created_at", { precision: 3 }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  // System field: Creator (auto-filled, do not modify)
+  createdBy: userProfile("_created_by").default(sql`CASE
+      WHEN (current_setting('app.user_id'::text, true) = ''::text) THEN NULL`),
+  // System field: Update time (auto-filled, do not modify)
+  updatedAt: customTimestamptz("_updated_at", { precision: 3 }).notNull().default(sql`CURRENT_TIMESTAMP`),
+  // System field: Updater (auto-filled, do not modify)
+  updatedBy: userProfile("_updated_by").default(sql`CASE
+      WHEN (current_setting('app.user_id'::text, true) = ''::text) THEN NULL`),
+}, (table) => [
+  uniqueIndex("uk_risk_feedback_cycle_hash").on(table.cycleKey, table.riskHash),
+  index("idx_risk_feedback_cycle").on(table.cycleKey),
+  index("idx_risk_feedback_status").on(table.status),
+]);
+
 // table aliases
 export const meegoPendingTable = meegoPending;
 export const workitemGroupMapTable = workitemGroupMap;
+export const riskFeedbackTable = riskFeedback;
